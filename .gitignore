@@ -1,4 +1,6 @@
 .DS_Store
+.idea
+.vscode
 *.[56789ao]
 *.a[56789o]
 *.so

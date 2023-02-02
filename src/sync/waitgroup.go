@@ -29,7 +29,9 @@ type WaitGroup struct {
 	// For this reason on 32 bit architectures we need to check in state()
 	// if state1 is aligned or not, and dynamically "swap" the field order if
 	// needed.
+	// 高32位保存开启的goroutine数量，低32位保存调用Wait()的goroutine数量
 	state1 uint64
+	// 调用Wait()的goroutine信号量
 	state2 uint32
 }
 
@@ -71,7 +73,9 @@ func (wg *WaitGroup) Add(delta int) {
 		defer race.Enable()
 	}
 	state := atomic.AddUint64(statep, uint64(delta)<<32)
+	// v 代表开启的goroutine数量
 	v := int32(state >> 32)
+	// w 代表调用Wait()等待的goroutine数量
 	w := uint32(state)
 	if race.Enabled && delta > 0 && v == int32(delta) {
 		// The first increment must be synchronized with Wait.
@@ -85,9 +89,13 @@ func (wg *WaitGroup) Add(delta int) {
 	if w != 0 && delta > 0 && v == int32(delta) {
 		panic("sync: WaitGroup misuse: Add called concurrently with Wait")
 	}
+	// 当有开启的goroutine或者没有Wait()等待者的时候就直接退出
 	if v > 0 || w == 0 {
 		return
 	}
+	// else { v == 0 && w != 0 }
+	// 说明开启的goroutine已经退出，则去通过信号量去唤醒Wait()的goroutine
+
 	// This goroutine has set counter to 0 when waiters > 0.
 	// Now there can't be concurrent mutations of state:
 	// - Adds must not happen concurrently with Wait,
@@ -99,6 +107,7 @@ func (wg *WaitGroup) Add(delta int) {
 	// Reset waiters count to 0.
 	*statep = 0
 	for ; w != 0; w-- {
+		// 唤醒等待goroutine
 		runtime_Semrelease(semap, false, 0)
 	}
 }
@@ -119,6 +128,7 @@ func (wg *WaitGroup) Wait() {
 		state := atomic.LoadUint64(statep)
 		v := int32(state >> 32)
 		w := uint32(state)
+		// 当注册的goroutine都退出，则Wait()等待结束
 		if v == 0 {
 			// Counter is 0, no need to wait.
 			if race.Enabled {
@@ -127,6 +137,7 @@ func (wg *WaitGroup) Wait() {
 			}
 			return
 		}
+		// 使用CAS操作来保证并发的正确性，如果这次CAS失败，则进行下次循环CAS
 		// Increment waiters count.
 		if atomic.CompareAndSwapUint64(statep, state, state+1) {
 			if race.Enabled && w == 0 {
@@ -136,6 +147,7 @@ func (wg *WaitGroup) Wait() {
 				// otherwise concurrent Waits will race with each other.
 				race.Write(unsafe.Pointer(semap))
 			}
+			// 注册信号量等待
 			runtime_Semacquire(semap)
 			if *statep != 0 {
 				panic("sync: WaitGroup is reused before previous Wait has returned")
